@@ -49,6 +49,7 @@
 #include <sys/time.h>
 #include "messages.h"
 #include "displayed_image.h"
+#include <api_setup_session.h>
 #ifdef SENSOR_SDA
 #include <bb_scd41.h>
 #include <bb_temperature.h>
@@ -99,11 +100,10 @@ PreferencesPersistence preferencesPersistence(preferences);
 StoredLogs storedLogs(LOG_MAX_NOTES_NUMBER / 2, LOG_MAX_NOTES_NUMBER / 2, PREFERENCES_LOG_KEY, PREFERENCES_LOG_BUFFER_HEAD_KEY, preferencesPersistence);
 
 static https_request_err_e downloadAndShow(); // download and show the image
-static uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer);
+// Non-static: used by api_setup_session (setup logo download / messages)
+uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer);
 static https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse);
-static void getDeviceCredentials();                  // receiveing API key and Friendly ID
-static bool performApiSetup();     // perform API setup call and return success
-static void downloadSetupImage();                    // download and display setup image
+// getDeviceCredentials / performApiSetup / downloadSetupImage → api_setup_session
 static void resetDeviceCredentials(void);            // reset device credentials API key, Friendly ID, Wi-Fi SSID and password
 void goToSleep(void);                         // sleep preparing
 static void goToSleepButtonOnly(void);               // sleep until button press, no timer
@@ -111,13 +111,13 @@ static bool setClock(void);                          // clock synchronization
 static float readBatteryVoltage(void);               // battery voltage reading
 static void submitStoredLogs(void);
 static void writeSpecialFunction(SPECIAL_FUNCTION function);
-static void writeImageToFile(const char *name, uint8_t *in_buffer, size_t size);
+void writeImageToFile(const char *name, uint8_t *in_buffer, size_t size);
 void showMessageWithLogo(MSG message_type);
 static void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message);
-static void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse);
+void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse);
 FirmwareUpdateService firmwareUpdateService(preferencesPersistence, getTime, WIFI_CONNECTION_RSSI);
 static void wifiErrorDeepSleep();
-static uint8_t *storedLogoOrDefault(int iType);
+uint8_t *storedLogoOrDefault(int iType);
 static bool checkCurrentFileName(String &newName);
 static DeviceStatusStamp getDeviceStatusStamp();
 void log_nvs_usage();
@@ -2217,7 +2217,7 @@ uint32_t downloadStream(WiFiClient *stream, int content_size, uint8_t *buffer)
   return counter;
 }
 
-https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
+static https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
 {
   https_request_err_e result = HTTPS_NO_ERR;
   int file_size = 0;
@@ -2791,334 +2791,6 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
 }
 
 /**
- * @brief Performs API setup call to get credentials and image URL
- * @return true if should continue to image download, false otherwise
- */
-static bool performApiSetup()
-{
-  // Set up the API inputs
-  ApiSetupInputs inputs;
-  inputs.baseUrl = preferences.getString(PREFERENCES_API_URL, API_BASE_URL);
-  inputs.macAddress = device_mac_address();
-  inputs.firmwareVersion = FW_VERSION_STRING;
-  inputs.model = String(DEVICE_MODEL);
-
-  Log.info("%s [%d]: [HTTPS] begin /api/setup ...\r\n", __FILE__, __LINE__);
-  Log.info("%s [%d]: RSSI: %d\r\n", __FILE__, __LINE__, WiFi.RSSI());
-  Log.info("%s [%d]: Device MAC address: %s\r\n", __FILE__, __LINE__, inputs.macAddress.c_str());
-
-  ApiSetupResult result;
-  // Call the API client
-#ifdef BOARD_TRMNL_X
-  if (g_modem && WifiCaptivePortal.getLastCredentials().is5GHz)
-  {
-    Log_info("API setup via modem (5 GHz path)");
-    String reqHeaders = formatHeaders(buildSetupHeaders(inputs));
-    auto httpRes = g_modem->httpGet(inputs.baseUrl + "/api/setup", "", 0, reqHeaders);
-    if (!httpRes.ok)
-    {
-      Log_error_submit("[MODEM] /api/setup request failed (%u bytes received)", httpRes.bytesReceived);
-      result = {HTTPS_RESPONSE_CODE_INVALID, {}, "Modem httpGet failed"};
-    }
-    else
-    {
-      auto apiResp = parseResponse_apiSetup(httpRes.body);
-      if (apiResp.outcome == ApiSetupOutcome::DeserializationError)
-        result = {HTTPS_JSON_PARSING_ERR, {}, "JSON deserialization error"};
-      else
-        result = {HTTPS_NO_ERR, apiResp, ""};
-    }
-  }
-  else
-#endif // BOARD_TRMNL_X
-  {
-    result = fetchApiSetup(inputs);
-  }
-  // Handle connection errors
-  if (result.error == HTTPS_UNABLE_TO_CONNECT)
-  {
-    showMessageWithLogo(WIFI_INTERNAL_ERROR);
-    Log_error_submit("[HTTPS] %s", result.error_detail.c_str());
-    return false;
-  }
-
-  // Handle JSON parsing errors
-  if (result.error == HTTPS_JSON_PARSING_ERR)
-  {
-    Log.error("%s [%d]: JSON deserialization error.\r\n", __FILE__, __LINE__);
-    return false;
-  }
-
-  // Handle HTTP request errors
-  if (result.error != HTTPS_NO_ERR)
-  {
-    if (WiFi.RSSI() > WIFI_CONNECTION_RSSI)
-    {
-      showMessageWithLogo(API_SETUP_FAILED);
-    }
-    else
-    {
-      showMessageWithLogo(WIFI_WEAK);
-    }
-    Log_error_submit("[HTTPS] Request failed: %s", result.error_detail.c_str());
-    return false;
-  }
-
-  // Process the successful response
-  auto &apiResponse = result.response;
-  uint16_t url_status = apiResponse.status;
-
-  Log.info("%s [%d]: GET... code: %d\r\n", __FILE__, __LINE__, url_status);
-
-  if (url_status == 200)
-  {
-    status = true;
-    Log.info("%s [%d]: status OK.\r\n", __FILE__, __LINE__);
-
-    String api_key = apiResponse.api_key;
-    Log.info("%s [%d]: API key - %s\r\n", __FILE__, __LINE__, api_key.c_str());
-    size_t res = preferences.putString(PREFERENCES_API_KEY, api_key);
-    Log.info("%s [%d]: api key saved in the preferences - %d\r\n", __FILE__, __LINE__, res);
-
-    String friendly_id = apiResponse.friendly_id;
-    Log.info("%s [%d]: friendly ID - %s\r\n", __FILE__, __LINE__, friendly_id.c_str());
-    res = preferences.putString(PREFERENCES_FRIENDLY_ID, friendly_id);
-    Log.info("%s [%d]: friendly ID saved in the preferences - %d\r\n", __FILE__, __LINE__, res);
-
-    String image_url = apiResponse.image_url;
-    Log.info("%s [%d]: image_url - %s\r\n", __FILE__, __LINE__, image_url.c_str());
-    image_url.toCharArray(filename, image_url.length() + 1);
-
-    String message_str = apiResponse.message;
-    Log.info("%s [%d]: message - %s\r\n", __FILE__, __LINE__, message_str.c_str());
-    message_str.toCharArray(message_buffer, message_str.length() + 1);
-
-    Log.info("%s [%d]: status - %d\r\n", __FILE__, __LINE__, status);
-    return true;
-  }
-  else if (url_status == 404)
-  {
-    Log_info("MAC Address is not registered on server");
-
-    showMessageWithLogo(MAC_NOT_REGISTERED, apiResponse);
-
-    preferences.putUInt(PREFERENCES_SLEEP_TIME_KEY, SLEEP_TIME_TO_SLEEP);
-
-    display_sleep();
-    goToSleep();
-    return false;
-  }
-  else
-  {
-    Log.info("%s [%d]: status FAIL.\r\n", __FILE__, __LINE__);
-    status = false;
-    return false;
-  }
-}
-
-/**
- * @brief Downloads and displays the setup image from the API response
- * @return none
- */
-static void downloadSetupImage()
-{
-  status = false;
-  Log.info("%s [%d]: filename - %s\r\n", __FILE__, __LINE__, filename);
-
-  #ifdef BOARD_TRMNL_X
-  if (WifiCaptivePortal.getLastCredentials().is5GHz && g_modem)
-  {
-    Log_info("Downloading setup image via modem (5 GHz path)");
-    auto httpRes = g_modem->httpGet(String(filename), "/logo.bmp");
-    if (!httpRes.ok || httpRes.bytesReceived != DISPLAY_BMP_IMAGE_SIZE)
-    {
-      Log_error_submit("Modem logo download failed: ok=%d bytes=%u expected=%u",
-                       httpRes.ok, httpRes.bytesReceived, DISPLAY_BMP_IMAGE_SIZE);
-      filesystem_file_delete("/logo.bmp");
-    }
-    String friendly_id = preferences.getString(PREFERENCES_FRIENDLY_ID, PREFERENCES_FRIENDLY_ID_DEFAULT);
-    display_show_msg(storedLogoOrDefault(0), FRIENDLY_ID, friendly_id, true, "", String(message_buffer));
-    need_to_refresh_display = 0;
-    return;
-  }
-#endif // BOARD_TRMNL_X
-
-  withHttp(filename, [&](HTTPClient *https, HttpError error) -> bool
-           {
-    if (error != HttpError::HTTPCLIENT_SUCCESS)
-    {
-      if (WiFi.RSSI() > WIFI_CONNECTION_RSSI)
-      {
-        showMessageWithLogo(API_IMAGE_DOWNLOAD_ERROR);
-      }
-      else
-      {
-        showMessageWithLogo(WIFI_WEAK);
-      }
-      Log_error_submit("[HTTPS] Unable to connect");
-      return false;
-    }
-
-    https->setTimeout(15000);
-    https->setConnectTimeout(15000);
-
-    Log.info("%s [%d]: [HTTPS] Request to %s\r\n", __FILE__, __LINE__, filename);
-    Log.info("%s [%d]: [HTTPS] GET..\r\n", __FILE__, __LINE__);
-
-    int httpCode = https->GET();
-
-    if(httpCode == HTTP_CODE_PERMANENT_REDIRECT ||httpCode == HTTP_CODE_TEMPORARY_REDIRECT){
-              https->end();
-              https->begin(https->getLocation());
-              Log_info("Redirected to: %s", https->getLocation().c_str());
-              https->setTimeout(15000);
-              https->setConnectTimeout(15000);
-              httpCode = https->GET();
-            }
-
-    // httpCode will be negative on error
-    if (httpCode <= 0)
-    {
-      if (WiFi.RSSI() > WIFI_CONNECTION_RSSI)
-      {
-        showMessageWithLogo(API_IMAGE_DOWNLOAD_ERROR);
-      }
-      else
-      {
-        showMessageWithLogo(WIFI_WEAK);
-      }
-      Log_error_submit("[HTTPS] GET... failed, error: %s", https->errorToString(httpCode).c_str());
-      return false;
-    }
-
-    // HTTP header has been send and Server response header has been handled
-    Log.info("%s [%d]: [HTTPS] GET... code: %d\r\n", __FILE__, __LINE__, httpCode);
-    
-    // file found at server
-    if (httpCode != HTTP_CODE_OK && httpCode != HTTP_CODE_MOVED_PERMANENTLY)
-    {
-      if (WiFi.RSSI() > WIFI_CONNECTION_RSSI)
-      {
-        showMessageWithLogo(API_IMAGE_DOWNLOAD_ERROR);
-      }
-      else
-      {
-        showMessageWithLogo(WIFI_WEAK);
-      }
-      Log_error_submit("[HTTPS] GET... failed, error: %s", https->errorToString(httpCode).c_str());
-      return false;
-    }
-
-    Log.info("%s [%d]: Content size: %d\r\n", __FILE__, __LINE__, https->getSize());
-
-    WiFiClient *stream = https->getStreamPtr();
-
-    uint32_t counter = 0;
-#ifdef BOARD_TRMNL_X
-    int contentSize = https->getSize();
-    buffer = (uint8_t *)malloc(contentSize > 0 ? contentSize : 1);
-    if (buffer == nullptr)
-    {
-      Log_error_submit("Failed to allocate buffer for setup image (%d bytes)", contentSize);
-      return false;
-    }
-    if (stream->available() && contentSize > 0)
-    {
-      counter = downloadStream(stream, contentSize, buffer);
-    }
-#else
-    // Read and save image data to buffer (BMP or PNG)
-    int contentSize = https->getSize();
-    buffer = (uint8_t *)malloc(contentSize > 0 ? contentSize : 1);
-    if (buffer == nullptr)
-    {
-      Log_error_submit("Failed to allocate buffer for setup image (%d bytes)", contentSize);
-      return false;
-    }
-    if (stream->available() && contentSize > 0)
-    {
-      counter = downloadStream(stream, contentSize, buffer);
-    }
-#endif
-
-    if (counter == DISPLAY_BMP_IMAGE_SIZE)
-    {
-      Log.info("%s [%d]: Received successfully\r\n", __FILE__, __LINE__);
-
-      writeImageToFile("/logo.bmp", buffer, DEFAULT_IMAGE_SIZE);
-
-      // show the image
-      String friendly_id = preferences.getString(PREFERENCES_FRIENDLY_ID, PREFERENCES_FRIENDLY_ID_DEFAULT);
-      display_show_msg(storedLogoOrDefault(0), FRIENDLY_ID, friendly_id, true, "", String(message_buffer));
-      need_to_refresh_display = 0;
-    }
-#ifdef BOARD_TRMNL_X 
-    else if (counter >= 4 && buffer[0] == 0x89 && buffer[1] == 'P' && buffer[2] == 'N' && buffer[3] == 'G')
-    {       
-      Log.info("%s [%d]: Received PNG setup logo (%d bytes)\r\n", __FILE__, __LINE__, counter);
-      writeImageToFile("/logo.png", buffer, counter);
-      free(buffer);
-      buffer = nullptr;
-
-      // show the image
-      String friendly_id = preferences.getString(PREFERENCES_FRIENDLY_ID, PREFERENCES_FRIENDLY_ID_DEFAULT);
-      display_show_msg(storedLogoOrDefault(0), FRIENDLY_ID, friendly_id, true, "", String(message_buffer));
-      need_to_refresh_display = 0;
-    }
-    else
-    {
-      free(buffer);
-      buffer = nullptr;
-      Log_error_submit("Setup image: unexpected format or size. Read: %d bytes (expected BMP %d)", counter, DISPLAY_BMP_IMAGE_SIZE);
-    }
-#else
-    else if (counter >= 4 && buffer[0] == 0x89 && buffer[1] == 'P' && buffer[2] == 'N' && buffer[3] == 'G')
-    {
-      Log.info("%s [%d]: Received PNG setup logo (%d bytes)\r\n", __FILE__, __LINE__, counter);
-      writeImageToFile("/logo.png", buffer, counter);
-      free(buffer);
-      buffer = nullptr;
-
-      String friendly_id = preferences.getString(PREFERENCES_FRIENDLY_ID, PREFERENCES_FRIENDLY_ID_DEFAULT);
-      display_show_msg(storedLogoOrDefault(0), FRIENDLY_ID, friendly_id, true, "", String(message_buffer));
-      need_to_refresh_display = 0;
-    }
-    else
-    {
-      if (buffer) {
-        free(buffer);
-        buffer = nullptr;
-      }
-      if (WiFi.RSSI() > WIFI_CONNECTION_RSSI)
-      {
-        showMessageWithLogo(API_SIZE_ERROR);
-      }
-      else
-      {
-        showMessageWithLogo(WIFI_WEAK);
-      }
-      Log_error_submit("Receiving failed. Read: %d", counter);
-    }
-#endif // !BOARD_TRMNL_X    
-    return true; });
-}
-
-/**
- * @brief Function to getting the friendly id and API key
- * @return none
- */
-static void getDeviceCredentials()
-{
-  bool shouldDownloadImage = performApiSetup();
-
-  Log.info("%s [%d]: status - %d\r\n", __FILE__, __LINE__, status);
-  if (shouldDownloadImage)
-  {
-    downloadSetupImage();
-  }
-}
-
-/**
  * @brief Function to reset the friendly id, API key, WiFi SSID and password
  * @param url Server URL address
  * @return none
@@ -3532,7 +3204,7 @@ static void submitStoredLogs(void)
   }
 }
 
-static void writeImageToFile(const char *name, uint8_t *in_buffer, size_t size)
+void writeImageToFile(const char *name, uint8_t *in_buffer, size_t size)
 {
   size_t res = filesystem_write_to_file(name, in_buffer, size);
   if (res != size)
@@ -3593,7 +3265,7 @@ void showMessageWithLogo(MSG message_type)
  * @param apiResponse The API setup response containing the message
  * @return none
  */
-static void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse)
+void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse)
 {
   display_show_msg(storedLogoOrDefault(0), message_type, "", false, "", apiResponse.message);
   need_to_refresh_display = 1;
@@ -3602,7 +3274,7 @@ static void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiRes
 
 // 0 = larger glyph for message screens
 // 1 = loading screen (mostly blank, small glyph in lower right corner)
-static uint8_t *storedLogoOrDefault(int iType)
+uint8_t *storedLogoOrDefault(int iType)
 {
 //
 // See if there are custom art assets in FLASH memory.
@@ -3718,7 +3390,7 @@ static void wifiErrorDeepSleep()
   goToSleep();
 }
 
-DeviceStatusStamp getDeviceStatusStamp()
+static DeviceStatusStamp getDeviceStatusStamp()
 {
   DeviceStatusStamp deviceStatus = {};
 
