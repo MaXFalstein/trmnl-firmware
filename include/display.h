@@ -75,6 +75,12 @@ typedef enum {
 
 battery_count_t detect_battery_count();
 
+/// @brief State of charge from the BQ27427 (or estimated from its voltage
+///        reading when BYPASS_BQ27427_SOC is defined). lipo.begin() must have
+///        succeeded first.
+/// @return state of charge, 0-100 %
+int getLipoSOC();
+
 extern "C" {
   void modem_enter_bootloader();
   void modem_reset_target();
@@ -191,5 +197,12 @@ void display_set_light_sleep(uint8_t enabled);
  * @return none
  */
 void display_sleep(void);
+
+/**
+ * @brief Function to wipe the display
+ * @param none
+ * @return none
+ */
+void display_wipe(void);
 
 #endif
