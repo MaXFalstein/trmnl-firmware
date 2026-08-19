@@ -75,7 +75,6 @@ const char *szHTTPErrors[] = {
 };
 
 static float vBatt;
-
 static https_request_err_e downloadAndShow(); // download and show the image
 static https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse);
 static void resetDeviceCredentials(void);            // reset device credentials API key, Friendly ID, Wi-Fi SSID and password
@@ -926,6 +925,9 @@ void bl_init(void)
       Log_error("SF not saved");
     }
   }
+  // Read the battery voltage BEFORE the display or WiFi is turned on
+  vBatt = battery().readVoltage();
+
   // EPD init
   // EPD clear
   Log.info("%s [%d]: Display init\r\n", __FILE__, __LINE__);
@@ -1005,8 +1007,8 @@ void bl_init(void)
   Log_info("BATTERY CHARGING: %s", battery_charging ? "YES" : "NO");
 
   battery().gaugeInit();
-#endif // BOARD_TRMNL_X
   vBatt = battery().readVoltage(); // Read the battery voltage BEFORE WiFi is turned on
+#endif // BOARD_TRMNL_X
 
   Log_info("Firmware version %s", Messages::firmware_version().c_str());
   Log_info("Arduino version %d.%d.%d", ESP_ARDUINO_VERSION_MAJOR, ESP_ARDUINO_VERSION_MINOR, ESP_ARDUINO_VERSION_PATCH);
@@ -1083,7 +1085,7 @@ void bl_init(void)
   WifiCredentials hardcodedCreds = {.ssid = "ssid-goes-here", .pswd = "password-goes-here"};
   Log_info("Hardcoded WiFi: connecting to SSID '%s'", hardcodedCreds.ssid.c_str());
   auto connectResult = WifiCaptivePortal.connect(hardcodedCreds);
-  Log_info("Hardcoded WiFi: connect result '%s'", wifiStatusStr(connectResult.status));
+  Log_info("Hardcoded WiFi: connect result '%s'", wifiStatusStr(connectResult));
 // goToSleep();
 #else
 
@@ -1534,6 +1536,21 @@ static https_request_err_e downloadAndShow()
   }
 
   https_request_err_e result = handleApiDisplayResponse(apiDisplayResult.response);
+  if (apiDisplayResult.response.filename == "screen_wiper.png") {
+      // Guard against re-fetching forever if the wiper is the only playlist item
+      static bool wiped_this_wake = false;
+      if (wiped_this_wake) {
+          Log_info("Screen wiper returned again; not wiping twice in one wake");
+          return result; // leave the wiped (white) screen as-is
+      }
+      wiped_this_wake = true;
+      Log_info("Detected screen wiper filename: %s, clearing display...", apiDisplayResult.response.filename.c_str());
+      display_wipe();
+      // Wiping leaves the screen blank; fetch and show the next playlist item
+      // right away instead of waiting for the next scheduled refresh.
+      Log_info("Screen wipe complete, fetching next playlist item");
+      return downloadAndShow();
+  }
 
   if (!status && result == HTTPS_SUCCESS) { // this means we already have this image stored in SPIFFS
       char szTemp[36];
