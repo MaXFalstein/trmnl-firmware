@@ -1,10 +1,10 @@
 #pragma once
 
 /**
- * TRMNL X touchbar confirmation flows (Wi-Fi reset / power-off).
+ * TRMNL X touchbar / IQS323 high-level handling.
  *
- * GME: confirmation handlers only. Gesture processing, playlist browse, and
- * portal tick remain in bl.cpp until follow-up PRs.
+ * Combines confirmation flows (G9a), playlist browse (G9b), and (on this
+ * branch) process_iqs323_data / bl_init hooks (G9c).
  */
 
 #ifdef BOARD_TRMNL_X
@@ -18,5 +18,11 @@ extern uint32_t s_power_off_cooldown_until;
 
 void handle_wifi_reset_confirmation(void);
 void handle_power_off_confirmation(void);
+
+/**
+ * Show a cached playlist image relative to the current browse position.
+ * @param offset -1 previous, +1 next (wraps within playlist_order)
+ */
+void show_cached_image_by_offset(int offset);
 
 #endif // BOARD_TRMNL_X
