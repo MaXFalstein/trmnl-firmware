@@ -1,8 +1,10 @@
 #pragma once
 
 /**
- * System UI message helpers for the e-paper (word-wrap painter, then
- * display_show_msg* screens in later G10 slices).
+ * System UI message helpers for the e-paper.
+ *
+ * G10a: Paint_DrawMultilineText. G10b: display_show_msg overloads.
+ * display_show_msg_qa stays in display.cpp until G10c.
  *
  * Public declarations stay in display.h so call sites (and lib/wificaptive)
  * keep a single include surface. Implementation lives in
