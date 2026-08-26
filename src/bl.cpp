@@ -15,6 +15,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <display.h>
+#include <display_messages.h>
 #include <stdlib.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
@@ -40,13 +41,9 @@
 #include <api-client/display.h>
 #include <api-client/request_headers.h>
 #include "driver/gpio.h"
-#include "esp_flash.h"
 #include <nvs.h>
 #include <serialize_log.h>
 #include <preferences_persistence.h>
-#include "logo_small.h"
-#include "logo_medium.h"
-#include "loading.h"
 #include <wifi-helpers.h>
 #include <sys/time.h>
 #include <misc/buzzer.h>
@@ -83,11 +80,7 @@ void goToSleep(void);                         // sleep preparing
 static void goToSleepButtonOnly(void);               // sleep until button press, no timer
 static void submitStoredLogs(void);
 static void writeSpecialFunction(SPECIAL_FUNCTION function);
-void showMessageWithLogo(MSG message_type);
-static void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message);
-static void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse);
 static void wifiErrorDeepSleep();
-static uint8_t *storedLogoOrDefault(int iType);
 static DeviceStatusStamp getDeviceStatusStamp();
 void config_gpio_for_lp();
 int png_to_epd(const uint8_t *pPNG, int iDataSize, bool bPrevious);
@@ -2860,78 +2853,8 @@ static void writeSpecialFunction(SPECIAL_FUNCTION function)
   }
 }
 
-static void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message)
-{
-  display_show_msg(storedLogoOrDefault(0), message_type, friendly_id, id, fw_version, message);
-  need_to_refresh_display = 1;
-  preferences.putBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
-}
-
-void showMessageWithLogo(MSG message_type)
-{
-  display_show_msg(storedLogoOrDefault(0), message_type);
-}
-
-/**
- * @brief Show a message with the logo using data from API setup response
- * @param message_type Type of message to display
- * @param apiResponse The API setup response containing the message
- * @return none
- */
-static void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse)
-{
-  display_show_msg(storedLogoOrDefault(0), message_type, "", false, "", apiResponse.message);
-  need_to_refresh_display = 1;
-  preferences.putBool(PREFERENCES_DEVICE_REGISTERED_KEY, false);
-}
-
 // 0 = larger glyph for message screens
 // 1 = loading screen (mostly blank, small glyph in lower right corner)
-static uint8_t *storedLogoOrDefault(int iType)
-{
-//
-// See if there are custom art assets in FLASH memory.
-// The top 4K of FLASH would be reserved for this data.
-// The images are stored as: logo_medium, loading
-//
-   uint32_t u32Size;
-   //esp_flash_t chip;
-   uint8_t *s;
-   uint16_t u16Size;
-   BRAND *pBrand;
-
-   u32Size = ESP.getFlashChipSize();
-   Log_info("%s [%d]: esp flash size: %" PRIu32 "\r\n", __FILE__, __LINE__, u32Size);
-   if (u32Size != 0) {
-   pBrand = (BRAND *)malloc(sizeof(BRAND)); // DEBUG - we can leak this memory for now
-   esp_flash_init(NULL);
-   esp_flash_read(NULL, (void *)pBrand, u32Size-sizeof(BRAND), sizeof(BRAND));
-   if (*(uint16_t *)&pBrand->u8Images[0] == 0xBBBF /*BB_BITMAP_MARKER*/) {
-      // Group5 compressed images are present, use them
-      if (iType == 0) {
-        return &pBrand->u8Images[0]; // the first image is the medium sized logo
-      } else { // the second image is the loading screen with small logo
-        // get the pointer to the loading image
-        s = &pBrand->u8Images[0];
-        u16Size = *(uint16_t *)&s[6]; // compressed image size
-        s += u16Size + 8; // skip to loading image
-        return s;
-      }
-   }
-  }
-#ifdef BOARD_X_CLASS
-    return const_cast<uint8_t *>(logo_medium);
-#else
-  if (iType == 0) {
-    return const_cast<uint8_t *>(logo_small);
-  } else {
-    // Force the loading screen to always use the slower update method because
-    // we don't know (yet) if the panel can handle the faster update modes
-    apiDisplayResult.response.maximum_compatibility = true;
-    return const_cast<uint8_t *>(loading);
-  }
-#endif
-}
 
 // Chop up long names to fit within the SPIFFS 31 character limit
 
