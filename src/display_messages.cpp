@@ -7,6 +7,7 @@
 
 #include "Group5.h"
 #include "Inter_18.h"
+#include "Roboto_Black_24.h"
 #include "messages.h"
 #include "nicoclean_8.h"
 #include "wifi_connect_qr.h"
@@ -778,4 +779,90 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
   bbep.fullUpdate();
 #endif
   Log_info("display_show_msg2 end");
+}
+
+void display_show_msg_qa(uint8_t *image_buffer, const float *voltage, const float *temperature, bool qa_result) {
+  auto width = display_width();
+  auto height = display_height();
+  UWORD Imagesize = ((width % 8 == 0) ? (width / 8) : (width / 8 + 1)) * height;
+  BB_RECT rect;
+
+  Log_info("display_show_msg start");
+  Log_info("maximum_compatibility = %d\n", apiDisplayResult.response.maximum_compatibility);
+#ifdef BB_EPAPER
+  bbep.allocBuffer(false);
+#else
+  bbep.setMode(BB_MODE_1BPP);
+  bbep.setTextColor(BBEP_BLACK, BBEP_WHITE);
+#endif
+  if (*(uint16_t *)image_buffer == BB_BITMAP_MARKER) {
+        // G5 compressed image
+    BB_BITMAP *pBBB = (BB_BITMAP *)image_buffer;
+    int x = (width - pBBB->width) / 2;
+    int y = (height - pBBB->height) / 2; // center it
+    if (x > 0 || y > 0) // only clear if the image is smaller than the display
+    {
+      bbep.fillScreen(BBEP_WHITE);
+    }
+    bbep.loadG5Image(image_buffer, x, y, BBEP_WHITE, BBEP_BLACK);
+  } else {
+#ifdef BB_EPAPER
+    memcpy(bbep.getBuffer(), image_buffer + 62, Imagesize); // uncompressed 1-bpp bitmap
+#endif
+  }
+
+  bbep.setFont(nicoclean_8); // Roboto_20);
+  bbep.setTextColor(BBEP_BLACK, BBEP_WHITE);
+
+  String voltageString = String("Initial voltage: ") + String(voltage[0], 4) + String(" V, ") +
+                         String("  Final voltage: ") + String(voltage[1], 4) + String(" V, ") + String("  Diff: ") +
+                         String(voltage[2], 4) + String(" V");
+
+  String temperatureString = String("Initial temperature: ") + String(temperature[0], 4) + String(" C, ") +
+                             String("  Final temperature: ") + String(temperature[1], 4) + String(" C") +
+                             String("  Diff: ") + String(temperature[2], 4) + String(" C");
+
+  bbep.getStringBox(voltageString.c_str(), &rect);
+  bbep.setCursor((bbep.width() - rect.w) / 2, 340);
+  bbep.print(voltageString);
+
+  bbep.getStringBox(temperatureString.c_str(), &rect);
+  bbep.setCursor((bbep.width() - rect.w) / 2, 370);
+  bbep.print(temperatureString);
+
+  String qaResultInstruction = (qa_result)
+                                 ? "QA passed, press button to clear screen"
+                                 : "QA failed, please use another board and put in failure pile for investigation";
+
+  bbep.getStringBox(qaResultInstruction.c_str(), &rect);
+  bbep.setCursor((bbep.width() - rect.w) / 2, 400);
+  bbep.println(qaResultInstruction);
+
+  String qaResultString = (qa_result) ? "PASS" : "FAIL";
+  bbep.setFont(Roboto_Black_24);
+  bbep.getStringBox(qaResultString.c_str(), &rect);
+  bbep.setCursor((bbep.width() - rect.w) / 2, 250);
+  bbep.print(qaResultString);
+
+#ifdef BB_EPAPER
+  if (!display_update_epaper(REFRESH_FULL, true, true, PLANE_0)) {
+    Log_error("display_show_msg_qa: e-paper update failed");
+    bbep.freeBuffer();
+    return;
+  }
+  bbep.freeBuffer();
+#else
+  bbep.fullUpdate();
+#endif
+  Log_info("display_show_msg end");
+    /*
+   const char string2[] = "PNG images can be a maximum of";
+      bbep.getStringBox(string2, &rect);
+      bbep.setCursor((bbep.width() - rect.w) / 2, -1);
+      bbep.println(string2);
+      String string3 = String(MAX_IMAGE_SIZE) + String(" bytes each and 1 or 2-bpp");
+      bbep.getStringBox(string3.c_str(), &rect);
+      bbep.setCursor((bbep.width() - rect.w) / 2, -1);
+      bbep.print(string3);
+  */
 }
