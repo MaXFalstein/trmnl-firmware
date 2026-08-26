@@ -84,7 +84,7 @@ static void goToSleepButtonOnly(void);               // sleep until button press
 static void submitStoredLogs(void);
 static void writeSpecialFunction(SPECIAL_FUNCTION function);
 void showMessageWithLogo(MSG message_type);
-static void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message);
+void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message);
 static void showMessageWithLogo(MSG message_type, const ApiSetupResponse &apiResponse);
 static void wifiErrorDeepSleep();
 static uint8_t *storedLogoOrDefault(int iType);
@@ -127,17 +127,6 @@ void wait_for_serial() {
 // ############################ SLIDER ##################################
 #include "IQS323.h"
 
-void process_iqs323_data(void);
-
-#define IQS323_I2C_ADDRESS 0x44
-// Touchbar indicator to redraw after a full-refresh (e.g. logo screen)
-static touchbar_side_t pending_indicator_side = TOUCHBAR_LEFT;
-static bool pending_indicator_filled = false;
-static bool has_pending_indicator = false;
-
-// Tracks first detection of both corners held so wakeup_time can be reset once
-static bool s_corners_detected = false;
-
 void showLastImageAndSleep()
 {
   int file_size = 0;
@@ -153,269 +142,6 @@ void showLastImageAndSleep()
   goToSleep();
 }
 
-// Returns true if channel i has been held for HOLD_THRESHOLD_MS since wakeup stub.
-// Releases the I2C lock during the wait so the iqs323 task can update the memory map.
-static bool tap_mode_is_hold(uint8_t channel_index, time_t hold_threshold_ms = 600)
-{
-  const uint32_t POLL_INTERVAL_MS = 20;
-
-  // update the memory map to get the latest touch states, but save wakeup stub values for TAPs
-  uint8_t saved_status[2] = { iqs323.IQSMemoryMap.SYSTEM_STATUS[0], iqs323.IQSMemoryMap.SYSTEM_STATUS[1] };
-  iqs323_task_i2c_lock();
-  iqs323.updateInfoFlags(STOP);
-  iqs323_task_i2c_unlock();
-
-  while (true) {
-    if (millis() - startup_time >= hold_threshold_ms) break;
-
-    iqs323_task_i2c_unlock();
-    delay(POLL_INTERVAL_MS);
-    iqs323_task_i2c_lock();
-
-    // Only read from chip when it has naturally opened a window (RDY LOW).
-    // Forcing I2C on every tick causes the chip to stop responding after ~30+ iterations
-    if (iqs323.getRDYStatus()) {
-      iqs323.updateInfoFlags(STOP);
-    }
-    if (!iqs323.channel_touchState((iqs323_channel_e)channel_index)) {
-      iqs323.IQSMemoryMap.SYSTEM_STATUS[0] = saved_status[0];
-      iqs323.IQSMemoryMap.SYSTEM_STATUS[1] = saved_status[1];
-      return false;
-    }
-  }
-
-  iqs323.updateInfoFlags(STOP);
-
-  if (!iqs323.channel_touchState((iqs323_channel_e)channel_index)) {
-    iqs323.IQSMemoryMap.SYSTEM_STATUS[0] = saved_status[0];
-    iqs323.IQSMemoryMap.SYSTEM_STATUS[1] = saved_status[1];
-  }
-  return iqs323.channel_touchState((iqs323_channel_e)channel_index);
-}
-
-// Check if both left and right corners are being held
-bool check_corners_gesture()
-{
-  // check updated values
-  bool left  = iqs323.channel_touchState(IQS323_CH0);
-  bool middle = iqs323.channel_touchState(IQS323_CH1);
-  bool right = iqs323.channel_touchState(IQS323_CH2);
-  Log_info("Hold edges: left=%d middle=%d right=%d tap_mode=%d", left, middle, right, touchbar_tap_mode);
-
-  if (touchbar_tap_mode) {
-    bool hold_left  = tap_mode_is_hold(0);
-    bool hold_right = tap_mode_is_hold(2);
-    Log_info("Hold edges tap mode: hold_left=%d hold_right=%d", hold_left, hold_right);
-    return hold_left && hold_right;
-  }
-  Log_info("Hold edges slider mode: event=%d (HOLD=%d) left=%d right=%d", slider_event, IQS323_GESTURE_HOLD, left, right);
-  return slider_event == IQS323_GESTURE_HOLD && left && right;
-}
-
-void check_channel_states(void)
-{
-  /* Loop through all the active channels */
-  for (uint8_t i = 0; i < 3; i++) {
-    if (iqs323.channel_touchState((iqs323_channel_e)(i))) {
-      if (touchbar_tap_mode) {
-        // Tap mode
-        bool hold = tap_mode_is_hold(i, 2000);  // 2 second hold for tap mode actions
-        switch (i) {
-        case 0:
-          if (!hold) {
-            display_draw_touchbar_indicator(TOUCHBAR_LEFT, false);
-            Log_info("Back button tapped");
-            pending_indicator_side = TOUCHBAR_LEFT;
-            pending_indicator_filled = false;
-            has_pending_indicator = true;
-            show_cached_image_by_offset(-1);
-          } else {
-            display_draw_touchbar_indicator(TOUCHBAR_LEFT, true);
-            Log_info("Back button hold");
-            pending_indicator_side = TOUCHBAR_LEFT;
-            pending_indicator_filled = true;
-            has_pending_indicator = true;
-            show_cached_image_by_offset(-1);
-          }
-          break;
-        case 1:
-          if (hold) {
-            display_draw_touchbar_indicator(TOUCHBAR_MIDDLE, true);
-            Log_info("Middle button hold");
-            pending_indicator_side = TOUCHBAR_MIDDLE;
-            pending_indicator_filled = true;
-            has_pending_indicator = true;
-            // Log_info("Middle button held - OTG toggle");
-            // if (otg_state) {
-            //   otg_turn_off();
-            //   showMessageWithLogo(OTG_TURNED_OFF); otg_state = false;
-            // }
-            // else {
-            //   otg_turn_on();
-            //   showMessageWithLogo(OTG_TURNED_ON);
-            //   otg_state = true;
-            // }
-            // delay(1000);
-            // showLastImageAndSleep();
-          } else {
-            display_draw_touchbar_indicator(TOUCHBAR_MIDDLE, false);
-            Log_info("Middle button tapped");
-            pending_indicator_side = TOUCHBAR_MIDDLE;
-            pending_indicator_filled = false;
-            has_pending_indicator = true;
-          }
-          break;
-        case 2:
-          if (!hold) {
-            display_draw_touchbar_indicator(TOUCHBAR_RIGHT, false);
-            Log_info("Next button tapped");
-            pending_indicator_side = TOUCHBAR_RIGHT;
-            pending_indicator_filled = false;
-            has_pending_indicator = true;
-            show_cached_image_by_offset(+1);
-          } else {
-            display_draw_touchbar_indicator(TOUCHBAR_RIGHT, true);
-            Log_info("Next button hold");
-            pending_indicator_side = TOUCHBAR_RIGHT;
-            pending_indicator_filled = true;
-            has_pending_indicator = true;
-            show_cached_image_by_offset(+1);
-          }
-          break;
-        }
-      } else {
-        // Slide mode
-        if ((slider_event == IQS323_GESTURE_TAP || slider_event == IQS323_GESTURE_HOLD)) {
-          printf("CH: %d: Touch\n", i);
-          switch (i) {
-          case 0:
-            display_draw_touchbar_indicator(TOUCHBAR_LEFT, slider_event == IQS323_GESTURE_HOLD);
-            Log_info("Back button pressed");
-            break;
-          case 1:
-            display_draw_touchbar_indicator(TOUCHBAR_MIDDLE, slider_event == IQS323_GESTURE_HOLD);
-            Log_info("Middle button pressed");
-            // if (otg_state) {
-            //   otg_turn_off();
-            //   showMessageWithLogo(OTG_TURNED_OFF); otg_state = false;
-            // }
-            // else {
-            //   otg_turn_on();
-            //   showMessageWithLogo(OTG_TURNED_ON);
-            //   otg_state = true;
-            // }
-            // delay(1000);
-            // showLastImageAndSleep();
-            break;
-          case 2:
-            display_draw_touchbar_indicator(TOUCHBAR_RIGHT, slider_event == IQS323_GESTURE_HOLD);
-            Log_info("Next button pressed");
-            break;
-          }
-        }
-      }
-    }
-  }
-}
-
-void read_slider_coordinates(void)
-{
-  /* read slider coordinates from memory */
-  uint16_t buffer = iqs323.sliderCoordinate();
-
-  if(buffer != slider_position)
-  {
-    slider_position = buffer;
-  }
-}
-
-/* Function to process Slider gesture events */
-void read_gesture_event(void)
-{
-  /* Read slider bit to check if a slider event occurred */
-  bool gesture_event = iqs323.getSliderEvent();
-  printf("Gesture event: %d\n", gesture_event);
-  if (gesture_event)
-  {
-    /* returns slider event that occurred (tap, swipe or flick) by reading event bits from MM */
-    iqs323_gesture_events gesture_buffer = iqs323.getGestureType();
-    printf("Gesture type: %d\n", gesture_buffer);
-    if(gesture_buffer != IQS323_GESTURE_NONE)
-    {
-      slider_event = gesture_buffer;
-      switch (slider_event)
-      {
-        case IQS323_GESTURE_UNKNOWN:
-          Log_info("SLIDER: UNKNOWN (something went wrong?)");
-          break;
-        case IQS323_GESTURE_TAP:
-          Log_info("SLIDER: Tap");
-          break;
-        case IQS323_GESTURE_SWIPE_NEGATIVE:
-          Log_info("SLIDER: Swipe <-");
-          if (!touchbar_tap_mode) {
-            show_cached_image_by_offset(-1);
-          }
-          break;
-        case IQS323_GESTURE_SWIPE_POSITIVE:
-          Log_info("SLIDER: Swipe ->");
-          if (!touchbar_tap_mode) {
-            show_cached_image_by_offset(+1);
-          }
-          break;
-        case IQS323_GESTURE_FLICK_NEGATIVE:
-          Log_info("SLIDER: Flick <-");
-          break;
-        case IQS323_GESTURE_FLICK_POSITIVE:
-          Log_info("SLIDER: Flick ->");
-          break;
-        case IQS323_GESTURE_HOLD:
-          Log_info("SLIDER: Hold");
-          break;
-        case IQS323_GESTURE_NONE:
-          Log_info("SLIDER: None");
-          break;
-      }
-
-      /* Clear event if a finger is removed from slider after the event was processed */
-      if (slider_position == 65535)
-      {
-        slider_event = IQS323_GESTURE_NONE;
-      }
-    }
-  }
-}
-void process_iqs323_data(void)
-{
-  /* Read slider coordinates from memory */
-  uint16_t buffer = iqs323.sliderCoordinate();
-
-  if(buffer != slider_position)
-  {
-    slider_position = buffer;
-  }
-
-  Log_info("Slider position: %d", slider_position);
-
-  iqs323_task_i2c_lock();
-
-  /* Read gesture event if available */
-  read_gesture_event();
-
-  iqs323_task_i2c_unlock();
-
-  if (!in_wifi_reset_confirmation && check_corners_gesture()) {
-    handle_wifi_reset_confirmation();
-    return;
-  }
-
-  iqs323_task_i2c_lock();
-
-  /* Check channel touch states */
-  check_channel_states();
-
-  iqs323_task_i2c_unlock();
-}
 // ############################ SLIDER ################################
 
 // ############################ ACCELERATOR ###########################
@@ -552,39 +278,18 @@ void bl_init(void)
 
   Wire.setClock(100000);
 
+  touchbarNotifyGpioWakeup(gpio_wakeup);
   if (gpio_wakeup) {
-    Log_info("GPIO wakeup detected (%d) - using wake stub data", wakeup_reason);
-    iqs323_task_notify_gpio_wakeup(true);
+    Log_info("GPIO wakeup reason: %d", wakeup_reason);
   } else {
-    Log_info("Non-GPIO wakeup (%d)", wakeup_reason);
+    Log_info("Non-GPIO wakeup reason: %d", wakeup_reason);
   }
 #endif // BOARD_TRMNL_X
 
 #ifdef BOARD_TRMNL_X
-  touchbar_tap_mode = preferences.getBool(PREFERENCES_TOUCHBAR_MODE_KEY, true);
-  Log_info("Touchbar mode from preferences: %s", touchbar_tap_mode ? "Tap" : "Slide");
-
-  // Start IQS323 task manager
-  if (!iqs323_task_init(NULL)) {
-    Log_error("IQS323 Task: Failed to start - rebooting");
-    delay(1000);
-    ESP.restart();
-  }
-
-  // Wait for IQS323 initialization to complete
-  if (!iqs323_task_wait_ready(5000)) {
-    Log_error("IQS323 Task: Initialization timeout - rebooting");
-    delay(1000);
-    ESP.restart();
-  }
-
-  if (gpio_wakeup) {
-    process_iqs323_data();
-  }
-
-  // For future
-  // iqs323_task_set_data_callback(process_iqs323_data);
-
+  touchbarSessionLoadMode();
+  touchbarSessionStartTask(gpio_wakeup);
+  // For future: iqs323_task_set_data_callback(process_iqs323_data);
   Log_info("init time: %ld us", init_time);
 #else // BOARD_TRMNL_X
 
@@ -708,12 +413,9 @@ void bl_init(void)
 
 #ifdef BOARD_TRMNL_X
 
-    if (!otg_message && WifiCaptivePortal.isSaved()) {
+    if (!touchbarHasOtgMessage() && WifiCaptivePortal.isSaved()) {
       display_show_image(storedLogoOrDefault(1), DEFAULT_IMAGE_SIZE, false, true);
-      if (has_pending_indicator) {
-        display_draw_touchbar_indicator(pending_indicator_side, pending_indicator_filled);
-        has_pending_indicator = false;
-      }
+      touchbarRedrawPendingIndicator();
     }
     else if (!WifiCaptivePortal.isSaved()) {
       showMessageWithLogo(NONE);
@@ -846,40 +548,8 @@ void bl_init(void)
 
     showMessageWithLogo(WIFI_CONNECT, "", false, Messages::firmware_version().c_str(), WifiCaptivePortal.getAPSSID());
 #ifdef BOARD_TRMNL_X
-    // set TAP mode as default
-    iqs323_task_i2c_lock();
-    iqs323.setGestureConfig(true, STOP);
-    iqs323_task_i2c_unlock();
-    touchbar_tap_mode = true;
-
-    static uint32_t s_corners_start_ms = 0;
-    WifiCaptivePortal.setPortalTickCallback([]() {
-      if (in_power_off_confirmation) return;
-      if (millis() < s_power_off_cooldown_until) return;
-      iqs323_task_i2c_lock();
-      if (iqs323.getRDYStatus()) {
-        iqs323.updateInfoFlags(STOP);
-      }
-      bool left  = iqs323.channel_touchState(IQS323_CH0);
-      bool right = iqs323.channel_touchState(IQS323_CH2);
-      if (left && right) {
-        if (!s_corners_detected) {
-          s_corners_start_ms = millis();
-          s_corners_detected = true;
-        } else if (millis() - s_corners_start_ms >= 600) {
-          s_corners_detected = false;
-          handle_power_off_confirmation();
-          // Only reached on cancel — confirmed path calls ESP.restart()
-          s_power_off_cooldown_until = millis() + 2000;
-          iqs323_task_i2c_unlock();
-          showMessageWithLogo(WIFI_CONNECT, "", false, Messages::firmware_version().c_str(), WifiCaptivePortal.getAPSSID());
-          return;
-        }
-      } else {
-        s_corners_detected = false;
-      }
-      iqs323_task_i2c_unlock();
-    });
+    touchbarPrepareCaptivePortal();
+    WifiCaptivePortal.setPortalTickCallback([]() { touchbarPortalTick(); });
 #endif
     WifiCaptivePortal.setResetSettingsCallback(resetDeviceCredentials);
     res = WifiCaptivePortal.startPortal();
@@ -898,7 +568,7 @@ void bl_init(void)
     preferences.putInt(PREFERENCES_CONNECT_WIFI_RETRY_COUNT, 1);
   }
 
-#endif
+#endif // HARDCODED_WIFI
 
   // clock synchronization
   if (systemClock().setTimeFromNTP())
@@ -2577,7 +2247,7 @@ static void writeSpecialFunction(SPECIAL_FUNCTION function)
   }
 }
 
-static void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message)
+void showMessageWithLogo(MSG message_type, String friendly_id, bool id, const char *fw_version, String message)
 {
   display_show_msg(storedLogoOrDefault(0), message_type, friendly_id, id, fw_version, message);
   need_to_refresh_display = 1;
